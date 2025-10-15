@@ -1,209 +1,120 @@
-
 import os
 import re
-import fitz  # PyMuPDF
-import docx
+import docx2txt
+import PyPDF2
 import pandas as pd
-from datetime import datetime
-import spacy
 
-# Load spaCy model
-nlp = spacy.load("en_core_web_sm")
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+FOLDER_PATH = r"c:\users\kapsharm\downloads\onedrive_2025-10-13\SAP FI 13th jun 2025"
+OUTPUT_FILE = "Resume_Extract.xlsx"
+ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.doc']
 
-# Define the folder path
-resume_folder = r"C:\Users\KAPSHARM\Downloads\OneDrive_2025-10-13\SAP FI 13th Jun 2025"
-
-# SAP keywords
-sap_keywords = [
-    "SAP FI", "SAP FICO", "SAP CO", "SAP S/4HANA", "SAP Finance", "SAP MM", "SAP SD", "SAP PP", "SAP QM",
-    "SAP PM", "SAP PS", "SAP HCM", "SAP HR", "SAP SuccessFactors", "SAP BW", "SAP BI", "SAP BO", "SAP BPC",
-    "SAP ABAP", "SAP BASIS", "SAP Fiori", "SAP UI5", "SAP CRM", "SAP SCM", "SAP APO", "SAP Ariba", "SAP IBP",
-    "SAP Hybris", "SAP PI", "SAP PO", "SAP Solution Manager", "SAP NetWeaver", "SAP Leonardo", "SAP Cloud Platform"
-]
-
-cert_keywords = ["SAP Certified", "Certification", "Certified", "ACCA", "CPA", "CMA", "CFA", "MBA", "CA"]
-
-email_pattern = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
-years_pattern = re.compile(r"(\d+(?:\.\d+)?)\s*(?:years|year|yrs|yr)", re.IGNORECASE)
-
-def extract_text_from_pdf(file_path):
+# -------------------------------
+# TEXT EXTRACTION FUNCTION
+# -------------------------------
+def extract_text(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
     text = ""
     try:
-        with fitz.open(file_path) as doc:
-            for page in doc:
-                text += page.get_text()
-    except Exception:
-        pass
+        if ext == '.pdf':
+            with open(file_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    text += page.extract_text() or ""
+        elif ext in ['.docx', '.doc']:
+            text = docx2txt.process(file_path)
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
     return text
 
-def extract_text_from_docx(file_path):
-    text = ""
-    try:
-        doc = docx.Document(file_path)
-        for para in doc.paragraphs:
-            text += para.text + "\n"
-    except Exception:
-        pass
-    return text
-
-def extract_email_and_context(text):
-    match = email_pattern.search(text)
+# -------------------------------
+# TOTAL EXPERIENCE EXTRACTION
+# -------------------------------
+def extract_total_exp(text, file_name):
+    patterns = [
+        r'Total\s*Experience[:\s]*([\d\.\+]+)\s*(years|yrs)?',
+        r'([\d\.\+]+)\s*(years|yrs)\s*of\s*experience',
+        r'Experience[:\s]*([\d\.\+]+)\s*(years|yrs)?'
+    ]
+    for pat in patterns:
+        match = re.search(pat, text, re.IGNORECASE)
+        if match:
+            try:
+                val = float(match.group(1))
+                if 0 < val < 60:  # realistic range
+                    return val
+            except:
+                continue
+    # fallback: check file name
+    match = re.search(r'(\d{1,2})\s*(yrs|years)', file_name, re.IGNORECASE)
     if match:
-        email = match.group()
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
-            if email in line:
-                start = max(0, i - 5)
-                end = min(len(lines), i + 5)
-                context = "\n".join(lines[start:end])
-                return email, context
-    return "", ""
+        val = int(match.group(1))
+        if 0 < val < 60:
+            return val
+    return ""  # Not found
 
-def extract_candidate_name(text, email, file_name):
-    lines = text.splitlines()
-    for line in lines[:30]:
-        line = line.strip()
-        if line and not any(x in line.lower() for x in ["summary", "objective", "experience", "skills", "resume"]):
-            if not any(char.isdigit() for char in line) and len(line.split()) <= 4:
-                return line
-    if email:
-        local = email.split("@")[0]
-        name = re.sub(r"[._\-]", " ", local)
-        return name.title()
-    name = os.path.splitext(file_name)[0]
-    name = re.sub(r"[._\-]", " ", name)
-    return name.title()
+# -------------------------------
+# SAP RELEVANT EXPERIENCE
+# -------------------------------
+def extract_sap_exp(text):
+    sap_years = ""
+    sap_desc = ""
+    matches = re.findall(r'(SAP\s+\w+).*?(\d+(\.\d+)?)\s*(years|yrs)', text, re.IGNORECASE)
+    if matches:
+        sap_years_list = []
+        desc_list = []
+        for m in matches:
+            module, years = m[0], float(m[1])
+            if years > 0 and years < 60:
+                sap_years_list.append(years)
+                desc_list.append(f"{module} ({years} yrs)")
+        if sap_years_list:
+            sap_years = round(sum(sap_years_list), 1)
+            sap_desc = "; ".join(desc_list)
+    elif re.search(r'SAP', text, re.IGNORECASE):
+        sentences = re.split(r'[.\n]', text)
+        sap_sentences = [s.strip() for s in sentences if 'SAP' in s]
+        if sap_sentences:
+            sap_desc = "; ".join(sap_sentences[:3])
+            sap_years = ""
+    return sap_years, sap_desc
 
-def extract_sap_skills(text):
-    found = []
-    for keyword in sap_keywords:
-        if keyword.lower() in text.lower():
-            found.append(keyword)
-    return ", ".join(found) if found else "Not Found"
+# -------------------------------
+# TOTAL EXPERIENCE INFO (BRIEF)
+# -------------------------------
+def extract_total_info(text):
+    sentences = re.split(r'[.\n]', text)
+    info_list = [s.strip() for s in sentences if re.search(r'experience|worked', s, re.IGNORECASE)]
+    return "; ".join(info_list[:3])
 
-def extract_certifications(text):
-    found = set()
-    for line in text.splitlines()[:200]:
-        for keyword in cert_keywords:
-            if keyword.lower() in line.lower():
-                found.add(keyword)
-    return ", ".join(found) if found else "Not Found"
+# -------------------------------
+# PROCESS FOLDER
+# -------------------------------
+def process_folder(folder_path):
+    data = []
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            if os.path.splitext(file)[1].lower() in ALLOWED_EXTENSIONS:
+                path = os.path.join(root, file)
+                text = extract_text(path)
+                total_exp = extract_total_exp(text, file)
+                sap_years, sap_desc = extract_sap_exp(text)
+                total_info = extract_total_info(text)
+                data.append({
+                    "File Name": file,
+                    "SAP Relevant Exp (yrs)": sap_years,
+                    "SAP Relevant Description": sap_desc,
+                    "SAP Total Exp Info": total_info,
+                    "Total Years Exp": total_exp
+                })
+    return pd.DataFrame(data)
 
-def extract_experience_lines(text):
-    sap_line = ""
-    total_line = ""
-    total_years = ""
-
-    # First pass: regex and keyword-based
-    lines = text.splitlines()
-    for line in lines:
-        if not sap_line and "sap" in line.lower() and "experience" in line.lower():
-            sap_line = line.strip()
-        if not total_line and any(x in line.lower() for x in ["total experience", "overall experience", "years of experience"]):
-            total_line = line.strip()
-        if not total_years:
-            match = re.search(r"(\\d+(?:\\.\\d+)?)\\s*(?:years|year|yrs|yr)", line, re.IGNORECASE)
-            if match:
-                total_years = float(match.group(1))
-
-    # NLP fallback
-    if not sap_line or not total_line or not total_years:
-        import spacy
-        nlp = spacy.load("en_core_web_sm")
-        doc = nlp(text)
-        for sent in doc.sents:
-            if not sap_line and "sap" in sent.text.lower() and "experience" in sent.text.lower():
-                sap_line = sent.text.strip()
-            if not total_line and any(x in sent.text.lower() for x in ["total experience", "overall experience", "years of experience"]):
-                total_line = sent.text.strip()
-            if not total_years:
-                match = re.search(r"(\\d+(?:\\.\\d+)?)\\s*(?:years|year|yrs|yr)", sent.text, re.IGNORECASE)
-                if match:
-                    total_years = float(match.group(1))
-
-    # Final fallback if SAP skills are found
-    if sap_line == "" or total_line == "" or total_years == "":
-        sap_line = sap_line or "SAP experience mentioned but not clearly stated"
-        total_line = total_line or "Total experience mentioned but not clearly stated"
-        total_years = total_years or 0.0
-
-    return sap_line, total_line, total_years
-    sap_line = ""
-    total_line = ""
-    total_years = ""
-
-    lines = text.splitlines()
-    for line in lines:
-        if not sap_line and "sap" in line.lower() and "experience" in line.lower():
-            sap_line = line.strip()
-        if not total_line and any(x in line.lower() for x in ["total experience", "overall experience", "years of experience"]):
-            total_line = line.strip()
-        if not total_years:
-            match = years_pattern.search(line)
-            if match:
-                total_years = float(match.group(1))
-
-    # NLP fallback
-    if not sap_line or not total_line or not total_years:
-        doc = nlp(text)
-        for sent in doc.sents:
-            if not sap_line and "sap" in sent.text.lower() and "experience" in sent.text.lower():
-                sap_line = sent.text.strip()
-            if not total_line and any(x in sent.text.lower() for x in ["total experience", "overall experience", "years of experience"]):
-                total_line = sent.text.strip()
-            if not total_years:
-                match = years_pattern.search(sent.text)
-                if match:
-                    total_years = float(match.group(1))
-
-    return sap_line if sap_line else "SAP experience mentioned but not clearly stated", \
-           total_line if total_line else "Total experience mentioned but not clearly stated", \
-           total_years if total_years else 0.0
-
-# Process resumes
-data = []
-sr_no = 1
-for file_name in os.listdir(resume_folder):
-    file_path = os.path.join(resume_folder, file_name)
-    if not os.path.isfile(file_path):
-        continue
-    if not file_name.lower().endswith((".pdf", ".docx")):
-        continue
-
-    text = extract_text_from_pdf(file_path) if file_name.lower().endswith(".pdf") else extract_text_from_docx(file_path)
-    if not text.strip():
-        continue
-
-    email, context = extract_email_and_context(text)
-    fast_text = context if context else "\n".join(text.splitlines()[:60])
-    candidate_name = extract_candidate_name(fast_text, email, file_name)
-    sap_skills = extract_sap_skills(text)
-    certifications = extract_certifications(fast_text)
-
-    sap_exp_line, total_exp_line, total_exp_years = extract_experience_lines(text)
-
-    data.append([
-        sr_no,
-        file_name,
-        candidate_name,
-        email if email else "Not Found",
-        sap_skills,
-        sap_exp_line,
-        total_exp_line,
-        total_exp_years,
-        certifications
-    ])
-    sr_no += 1
-
-# Save to Excel
-columns = [
-    "Sr No", "File Name", "Candidate Name", "Candidate Email",
-    "Relevant SAP Skills", "SAP Experience (line)",
-    "Total Experience (line)", "Total Exp (years)", "Certifications"
-]
-df = pd.DataFrame(data, columns=columns)
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-output_file = os.path.join(resume_folder, f"Resume_Simplified_Extract_{timestamp}.xlsx")
-df.to_excel(output_file, index=False)
-
-print(f"Resume data extracted and saved to: {output_file}")
+# -------------------------------
+# MAIN
+# -------------------------------
+if __name__ == "__main__":
+    df = process_folder(FOLDER_PATH)
+    df.to_excel(OUTPUT_FILE, index=False)
+    print(f"Extraction complete! Data saved to {OUTPUT_FILE}")
